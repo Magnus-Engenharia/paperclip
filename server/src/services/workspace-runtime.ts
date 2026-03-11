@@ -81,6 +81,34 @@ const runtimeServicesById = new Map<string, RuntimeServiceRecord>();
 const runtimeServicesByReuseKey = new Map<string, string>();
 const runtimeServiceLeasesByRun = new Map<string, string[]>();
 
+
+const SAFE_BASE_ENV_KEYS = [
+  "PATH",
+  "HOME",
+  "SHELL",
+  "TMPDIR",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "TERM",
+  "TZ",
+] as const;
+
+function buildSafeBaseEnv(extra?: Record<string, string | undefined>): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of SAFE_BASE_ENV_KEYS) {
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
+  }
+  if (extra) {
+    for (const [key, value] of Object.entries(extra)) {
+      if (value !== undefined) env[key] = value;
+    }
+  }
+  return env;
+}
+
+
 function stableStringify(value: unknown): string {
   if (Array.isArray(value)) {
     return `[${value.map((entry) => stableStringify(entry)).join(",")}]`;
@@ -213,7 +241,7 @@ async function runGit(args: string[], cwd: string): Promise<string> {
     const child = spawn("git", args, {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
-      env: process.env,
+      env: buildSafeBaseEnv(),
     });
     let stdout = "";
     let stderr = "";
@@ -245,7 +273,7 @@ function buildWorkspaceCommandEnv(input: {
   agent: ExecutionWorkspaceAgentRef;
   created: boolean;
 }) {
-  const env: NodeJS.ProcessEnv = { ...process.env };
+  const env: NodeJS.ProcessEnv = buildSafeBaseEnv();
   env.PAPERCLIP_WORKSPACE_CWD = input.worktreePath;
   env.PAPERCLIP_WORKSPACE_PATH = input.worktreePath;
   env.PAPERCLIP_WORKSPACE_WORKTREE_PATH = input.worktreePath;
@@ -491,6 +519,30 @@ function resolveServiceScopeId(input: {
   return { scopeType: "run" as const, scopeId: input.runId };
 }
 
+
+
+function isLocalReadinessHost(hostname: string) {
+  const h = hostname.trim().toLowerCase();
+  return h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]" || h === "host.docker.internal";
+}
+
+function assertSafeReadinessUrl(rawUrl: string) {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error(`Invalid readiness URL: ${rawUrl}`);
+  }
+  const protocol = parsed.protocol.toLowerCase();
+  if (protocol !== "http:" && protocol !== "https:") {
+    throw new Error(`Unsupported readiness URL protocol: ${protocol}`);
+  }
+  const allowRemote = process.env.PAPERCLIP_RUNTIME_READINESS_ALLOW_REMOTE === "true";
+  if (!allowRemote && !isLocalReadinessHost(parsed.hostname)) {
+    throw new Error(`Blocked non-local readiness URL host: ${parsed.hostname}`);
+  }
+}
+
 async function waitForReadiness(input: {
   service: Record<string, unknown>;
   url: string | null;
@@ -498,6 +550,7 @@ async function waitForReadiness(input: {
   const readiness = parseObject(input.service.readiness);
   const readinessType = asString(readiness.type, "");
   if (readinessType !== "http" || !input.url) return;
+  assertSafeReadinessUrl(input.url);
   const timeoutSec = Math.max(1, asNumber(readiness.timeoutSec, 30));
   const intervalMs = Math.max(100, asNumber(readiness.intervalMs, 500));
   const deadline = Date.now() + timeoutSec * 1000;
@@ -683,7 +736,7 @@ async function startLocalRuntimeService(input: {
     port,
   });
   const serviceCwd = resolveConfiguredPath(renderTemplate(serviceCwdTemplate, templateData), input.workspace.cwd);
-  const env: Record<string, string> = { ...process.env, ...input.adapterEnv } as Record<string, string>;
+  const env: Record<string, string> = { ...(buildSafeBaseEnv() as Record<string, string>), ...input.adapterEnv } as Record<string, string>;
   for (const [key, value] of Object.entries(envConfig)) {
     if (typeof value === "string") {
       env[key] = renderTemplate(value, templateData);

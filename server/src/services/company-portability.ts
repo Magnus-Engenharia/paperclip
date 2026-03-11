@@ -381,6 +381,7 @@ function parseFrontmatterMarkdown(raw: string): MarkdownDoc {
 }
 
 async function fetchJson(url: string) {
+  assertSafePortabilityUrl(url);
   const response = await fetch(url);
   if (!response.ok) {
     throw unprocessable(`Failed to fetch ${url}: ${response.status}`);
@@ -389,11 +390,60 @@ async function fetchJson(url: string) {
 }
 
 async function fetchText(url: string) {
+  assertSafePortabilityUrl(url);
   const response = await fetch(url);
   if (!response.ok) {
     throw unprocessable(`Failed to fetch ${url}: ${response.status}`);
   }
   return response.text();
+}
+
+
+
+function isPrivateOrLocalHostname(hostname: string) {
+  const h = hostname.trim().toLowerCase();
+  if (!h) return true;
+  if (h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]") return true;
+  if (h.endsWith(".local") || h.endsWith(".internal")) return true;
+  if (/^10\./.test(h) || /^192\.168\./.test(h)) return true;
+  if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(h)) return true;
+  if (/^169\.254\./.test(h)) return true;
+  return false;
+}
+
+function portabilityAllowedHosts() {
+  const defaults = ["github.com", "raw.githubusercontent.com", "api.github.com"];
+  const raw = process.env.PAPERCLIP_PORTABILITY_ALLOWED_HOSTS?.trim();
+  if (!raw) return new Set(defaults);
+  return new Set(
+    raw
+      .split(",")
+      .map((v) => v.trim().toLowerCase())
+      .filter(Boolean)
+      .concat(defaults),
+  );
+}
+
+function assertSafePortabilityUrl(rawUrl: string) {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw unprocessable(`Invalid portability URL: ${rawUrl}`);
+  }
+  const protocol = parsed.protocol.toLowerCase();
+  if (protocol !== "https:" && protocol !== "http:") {
+    throw unprocessable(`Unsupported URL protocol for portability fetch: ${protocol}`);
+  }
+  const host = parsed.hostname.toLowerCase();
+  const allowPrivate = process.env.PAPERCLIP_PORTABILITY_ALLOW_PRIVATE === "true";
+  if (!allowPrivate && isPrivateOrLocalHostname(host)) {
+    throw unprocessable(`Blocked private/local portability URL host: ${host}`);
+  }
+  const allowed = portabilityAllowedHosts();
+  if (!allowed.has(host)) {
+    throw unprocessable(`Blocked portability URL host: ${host}`);
+  }
 }
 
 function dedupeRequiredSecrets(values: CompanyPortabilityManifest["requiredSecrets"]) {

@@ -57,3 +57,36 @@ export function redactEventPayload(payload: Record<string, unknown> | null): Rec
   if (!isPlainObject(payload)) return payload;
   return sanitizeRecord(payload);
 }
+
+
+const HIGH_ENTROPY_TOKEN_RE = /(?:sk|rk|pk|ghp|gho|ghu|github_pat|xox[baprs])[-_A-Za-z0-9]{12,}/g;
+const AUTH_HEADER_RE = /(authorization\s*:\s*bearer\s+)[^\s"']+/gi;
+
+export function redactTextContent(input: string): string {
+  let out = input;
+  out = out.replace(JWT_VALUE_RE, REDACTED_EVENT_VALUE);
+  out = out.replace(HIGH_ENTROPY_TOKEN_RE, REDACTED_EVENT_VALUE);
+  out = out.replace(AUTH_HEADER_RE, `$1${REDACTED_EVENT_VALUE}`);
+  return out;
+}
+
+function redactUnknown(value: unknown): unknown {
+  if (value === null || value === undefined) return value;
+  if (typeof value === "string") return redactTextContent(value);
+  if (Array.isArray(value)) return value.map(redactUnknown);
+  if (!isPlainObject(value)) return value;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value)) {
+    if (SECRET_PAYLOAD_KEY_RE.test(k)) {
+      out[k] = REDACTED_EVENT_VALUE;
+    } else {
+      out[k] = redactUnknown(v);
+    }
+  }
+  return out;
+}
+
+export function redactRunResultJson(resultJson: Record<string, unknown> | null | undefined): Record<string, unknown> | null | undefined {
+  if (resultJson === null || resultJson === undefined) return resultJson;
+  return redactUnknown(resultJson) as Record<string, unknown>;
+}

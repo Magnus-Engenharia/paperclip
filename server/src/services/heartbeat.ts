@@ -25,6 +25,7 @@ import { costService } from "./costs.js";
 import { secretService } from "./secrets.js";
 import { resolveDefaultAgentWorkspaceDir } from "../home-paths.js";
 import { summarizeHeartbeatRunResultJson } from "./heartbeat-run-summary.js";
+import { redactRunResultJson, redactTextContent } from "../redaction.js";
 import {
   buildWorkspaceReadyComment,
   ensureRuntimeServicesForRun,
@@ -1542,6 +1543,10 @@ export function heartbeatService(db: Db) {
             } as Record<string, unknown>)
           : null;
 
+      const sanitizedResultJson = redactRunResultJson(adapterResult.resultJson ?? null);
+      const sanitizedStdoutExcerpt = redactTextContent(stdoutExcerpt);
+      const sanitizedStderrExcerpt = redactTextContent(stderrExcerpt);
+
       await setRunStatus(run.id, status, {
         finishedAt: new Date(),
         error:
@@ -1561,10 +1566,10 @@ export function heartbeatService(db: Db) {
         exitCode: adapterResult.exitCode,
         signal: adapterResult.signal,
         usageJson,
-        resultJson: adapterResult.resultJson ?? null,
+        resultJson: sanitizedResultJson,
         sessionIdAfter: nextSessionState.displayId ?? nextSessionState.legacySessionId,
-        stdoutExcerpt,
-        stderrExcerpt,
+        stdoutExcerpt: sanitizedStdoutExcerpt,
+        stderrExcerpt: sanitizedStderrExcerpt,
         logBytes: logSummary?.bytes,
         logSha256: logSummary?.sha256,
         logCompressed: logSummary?.compressed ?? false,
