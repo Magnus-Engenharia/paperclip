@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import path from "node:path";
 import { and, asc, desc, eq, gt, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -284,6 +285,133 @@ function deriveCommentId(
     null
   );
 }
+
+function normalizeRequiredArtifactPaths(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string") continue;
+    const trimmed = entry.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+  }
+  return out;
+}
+
+function normalizeChecklistItems(value: unknown): Array<{ label: string; done: boolean }> {
+  if (!Array.isArray(value)) return [];
+  const out: Array<{ label: string; done: boolean }> = [];
+  for (const entry of value) {
+    if (typeof entry === "string") {
+      const label = entry.trim();
+      if (label) out.push({ label, done: false });
+      continue;
+    }
+    if (!entry || typeof entry !== "object") continue;
+    const item = entry as Record<string, unknown>;
+    const label =
+      readNonEmptyString(item.label) ??
+      readNonEmptyString(item.title) ??
+      readNonEmptyString(item.text) ??
+      "unnamed item";
+    const rawStatus = readNonEmptyString(item.status)?.toLowerCase();
+    const done =
+      item.done === true ||
+      item.completed === true ||
+      item.checked === true ||
+      rawStatus === "done" ||
+      rawStatus === "completed" ||
+      rawStatus === "passed" ||
+      rawStatus === "ok";
+    out.push({ label, done });
+  }
+  return out;
+}
+
+function extractCompletionValidatorInputs(input: {
+  context: Record<string, unknown>;
+  issueExecutionWorkspaceSettings: Record<string, unknown> | null;
+  adapterResultJson: Record<string, unknown>;
+}) {
+  const { context, issueExecutionWorkspaceSettings, adapterResultJson } = input;
+  const ctxCompletion = parseObject(context.paperclipCompletionRequirements);
+  const runCompletion = parseObject(adapterResultJson.paperclipCompletionRequirements);
+  const requiredArtifactPaths =
+    context.requiredArtifactPaths ??
+    context.paperclipRequiredArtifactPaths ??
+    issueExecutionWorkspaceSettings?.requiredArtifactPaths ??
+    ctxCompletion.requiredArtifactPaths ??
+    adapterResultJson.requiredArtifactPaths ??
+    runCompletion.requiredArtifactPaths;
+  const acceptanceChecklist =
+    context.acceptanceChecklist ??
+    context.paperclipAcceptanceChecklist ??
+    issueExecutionWorkspaceSettings?.acceptanceChecklist ??
+    ctxCompletion.acceptanceChecklist ??
+    adapterResultJson.acceptanceChecklist ??
+    runCompletion.acceptanceChecklist;
+  return {
+    requiredArtifactPaths: normalizeRequiredArtifactPaths(requiredArtifactPaths),
+    acceptanceChecklist: normalizeChecklistItems(acceptanceChecklist),
+  };
+}
+
+export async function runShadowCompletionValidator(input: {
+  cwd: string;
+  requiredArtifactPaths: string[];
+  acceptanceChecklist: Array<{ label: string; done: boolean }>;
+}) {
+  const missingArtifacts: string[] = [];
+  const unreadableArtifacts: string[] = [];
+  for (const relativePath of input.requiredArtifactPaths) {
+    const absolute = path.resolve(input.cwd, relativePath);
+    try {
+      await fs.access(absolute, fsConstants.R_OK);
+    } catch {
+      try {
+        await fs.stat(absolute);
+        unreadableArtifacts.push(relativePath);
+      } catch {
+        missingArtifacts.push(relativePath);
+      }
+    }
+  }
+
+  const incompleteChecklist = input.acceptanceChecklist
+    .filter((item) => !item.done)
+    .map((item) => item.label);
+
+  const warnings: string[] = [];
+  if (missingArtifacts.length > 0) {
+    warnings.push(`Shadow completion validator: missing required artifacts (${missingArtifacts.join(", ")}).`);
+  }
+  if (unreadableArtifacts.length > 0) {
+    warnings.push(
+      `Shadow completion validator: unreadable required artifacts (${unreadableArtifacts.join(", ")}).`,
+    );
+  }
+  if (incompleteChecklist.length > 0) {
+    warnings.push(
+      `Shadow completion validator: incomplete checklist items (${incompleteChecklist.join(", ")}).`,
+    );
+  }
+
+  return {
+    mode: "shadow" as const,
+    checkedAt: new Date().toISOString(),
+    requiredArtifactPaths: input.requiredArtifactPaths,
+    acceptanceChecklist: input.acceptanceChecklist,
+    flags: {
+      missingArtifacts,
+      unreadableArtifacts,
+      incompleteChecklist,
+    },
+    warnings,
+  };
+}
+
 
 function enrichWakeContextSnapshot(input: {
   contextSnapshot: Record<string, unknown>;
@@ -1543,7 +1671,38 @@ export function heartbeatService(db: Db) {
             } as Record<string, unknown>)
           : null;
 
-      const sanitizedResultJson = redactRunResultJson(adapterResult.resultJson ?? null);
+      const adapterResultJson = parseObject(adapterResult.resultJson);
+      const completionValidatorInputs = extractCompletionValidatorInputs({
+        context,
+        issueExecutionWorkspaceSettings,
+        adapterResultJson,
+      });
+      const shouldRunCompletionValidator =
+        completionValidatorInputs.requiredArtifactPaths.length > 0 ||
+        completionValidatorInputs.acceptanceChecklist.length > 0;
+      let completionValidator: Awaited<ReturnType<typeof runShadowCompletionValidator>> | null = null;
+      if (shouldRunCompletionValidator) {
+        completionValidator = await runShadowCompletionValidator({
+          cwd: executionWorkspace.cwd,
+          requiredArtifactPaths: completionValidatorInputs.requiredArtifactPaths,
+          acceptanceChecklist: completionValidatorInputs.acceptanceChecklist,
+        });
+        for (const warning of completionValidator.warnings) {
+          await onLog("stderr", `[paperclip] ${warning}
+`);
+        }
+      }
+
+      const resultJsonWithValidator: Record<string, unknown> = {
+        ...adapterResultJson,
+        ...(completionValidator
+          ? {
+              paperclipCompletionValidator: completionValidator,
+            }
+          : {}),
+      };
+
+      const sanitizedResultJson = redactRunResultJson(resultJsonWithValidator);
       const sanitizedStdoutExcerpt = redactTextContent(stdoutExcerpt);
       const sanitizedStderrExcerpt = redactTextContent(stderrExcerpt);
 

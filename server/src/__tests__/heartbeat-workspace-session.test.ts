@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { resolveDefaultAgentWorkspaceDir } from "../home-paths.js";
 import {
   resolveRuntimeSessionParamsForWorkspace,
+  runShadowCompletionValidator,
   shouldResetTaskSessionForWake,
   type ResolvedWorkspaceForRun,
 } from "../services/heartbeat.ts";
@@ -139,5 +140,38 @@ describe("shouldResetTaskSessionForWake", () => {
         wakeTriggerDetail: "callback",
       }),
     ).toBe(false);
+  });
+});
+
+
+describe("runShadowCompletionValidator", () => {
+  it("reports missing artifacts and incomplete checklist items in shadow mode", async () => {
+    const result = await runShadowCompletionValidator({
+      cwd: "/tmp",
+      requiredArtifactPaths: ["missing-artifact.txt"],
+      acceptanceChecklist: [
+        { label: "tests passing", done: false },
+        { label: "docs updated", done: true },
+      ],
+    });
+
+    expect(result.mode).toBe("shadow");
+    expect(result.flags.missingArtifacts).toEqual(["missing-artifact.txt"]);
+    expect(result.flags.incompleteChecklist).toEqual(["tests passing"]);
+    expect(result.warnings.some((entry) => entry.includes("missing required artifacts"))).toBe(true);
+    expect(result.warnings.some((entry) => entry.includes("incomplete checklist items"))).toBe(true);
+  });
+
+  it("returns no warnings when requirements are satisfied", async () => {
+    const result = await runShadowCompletionValidator({
+      cwd: process.cwd(),
+      requiredArtifactPaths: [],
+      acceptanceChecklist: [{ label: "done", done: true }],
+    });
+
+    expect(result.flags.missingArtifacts).toEqual([]);
+    expect(result.flags.unreadableArtifacts).toEqual([]);
+    expect(result.flags.incompleteChecklist).toEqual([]);
+    expect(result.warnings).toEqual([]);
   });
 });
