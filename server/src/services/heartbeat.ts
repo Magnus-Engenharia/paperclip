@@ -1290,6 +1290,17 @@ export function heartbeatService(db: Db) {
       previousSessionParams,
       { useProjectWorkspace: executionWorkspaceMode !== "agent_default" },
     );
+    logger.info({
+      runId,
+      agentId: agent.id,
+      issueId,
+      taskKey,
+      executionProjectId,
+      executionWorkspaceMode,
+      resolvedWorkspaceDir: resolvedWorkspace.workspaceDir,
+      resolvedWorkspaceCwd: resolvedWorkspace.cwd,
+      usedProjectWorkspace: executionWorkspaceMode !== "agent_default",
+    }, "heartbeat execution context resolved");
     const workspaceManagedConfig = buildExecutionWorkspaceAdapterConfig({
       agentConfig: config,
       projectPolicy: projectExecutionWorkspacePolicy,

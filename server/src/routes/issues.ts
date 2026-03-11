@@ -1,4 +1,6 @@
 import { Router, type Request, type Response } from "express";
+import { access as fsAccess } from "node:fs/promises";
+import path from "node:path";
 import multer from "multer";
 import type { Db } from "@paperclipai/db";
 import {
@@ -23,7 +25,7 @@ import {
   projectService,
 } from "../services/index.js";
 import { logger } from "../middleware/logger.js";
-import { forbidden, HttpError, unauthorized } from "../errors.js";
+import { forbidden, HttpError, unauthorized, unprocessable } from "../errors.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import { shouldWakeAssigneeOnCheckout } from "./issues-checkout-wakeup.js";
 import { isAllowedContentType, MAX_ATTACHMENT_BYTES } from "../attachment-types.js";
@@ -487,6 +489,43 @@ export function issueRoutes(db: Db, storage: StorageService) {
       }
     }
     if (!(await assertAgentRunCheckoutOwnership(req, res, existing))) return;
+
+    if (req.body.status === "done") {
+      const requiredFromDescription = Array.from(
+        (existing.description ?? "").matchAll(/Create file:\s*([^\n\r]+)/gi),
+      )
+        .map((m) => (m[1] ?? "").trim())
+        .filter(Boolean);
+
+      const requiredPaths = Array.from(new Set(requiredFromDescription));
+      logger.info({ issueId: existing.id, identifier: existing.identifier, actorType: req.actor.type, actorId: req.actor.type === "agent" ? req.actor.agentId : req.actor.userId, requiredPaths }, "close-gate validation for issue done transition");
+      if (requiredPaths.length > 0) {
+        if (!existing.projectId) throw unprocessable("Cannot validate required artifacts without project context");
+        const project = await projectsSvc.getById(existing.projectId);
+        const workspaceCwd = project?.primaryWorkspace?.cwd ?? null;
+        if (!workspaceCwd) throw unprocessable("Cannot validate required artifacts: project primary workspace not configured");
+
+        const missing: string[] = [];
+        for (const rel of requiredPaths) {
+          const resolved = path.resolve(workspaceCwd, rel);
+          const normalizedBase = path.resolve(workspaceCwd) + path.sep;
+          if (!resolved.startsWith(normalizedBase)) {
+            missing.push(rel);
+            continue;
+          }
+          try {
+            await fsAccess(resolved);
+          } catch {
+            missing.push(rel);
+          }
+        }
+        if (missing.length > 0) {
+          logger.warn({ issueId: existing.id, identifier: existing.identifier, workspaceCwd, missing, requiredPaths }, "close-gate blocked done transition due to missing artifacts");
+          throw unprocessable(`Cannot close issue: missing required artifacts (${missing.join(", ")})`);
+        }
+        logger.info({ issueId: existing.id, identifier: existing.identifier, workspaceCwd, requiredPaths }, "close-gate passed; allowing done transition");
+      }
+    }
 
     const { comment: commentBody, hiddenAt: hiddenAtRaw, ...updateFields } = req.body;
     if (hiddenAtRaw !== undefined) {
