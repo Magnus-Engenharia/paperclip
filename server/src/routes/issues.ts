@@ -526,6 +526,26 @@ export function issueRoutes(db: Db, storage: StorageService) {
         logger.info({ issueId: existing.id, identifier: existing.identifier, workspaceCwd, requiredPaths }, "close-gate passed; allowing done transition");
       }
 
+      // Parent close-gate: cannot close a parent issue while active child issues remain.
+      const childIssues = await svc.list(existing.companyId, { parentId: existing.id });
+      const blockingChildren = childIssues.filter(
+        (child) => child.status !== "done" && child.status !== "cancelled",
+      );
+      logger.info(
+        {
+          issueId: existing.id,
+          identifier: existing.identifier,
+          childCount: childIssues.length,
+          blockingChildren: blockingChildren.map((c) => ({ identifier: c.identifier, status: c.status })),
+        },
+        "parent close-gate child completion check",
+      );
+      if (blockingChildren.length > 0) {
+        throw unprocessable(
+          `Cannot close issue: active child issues remain (${blockingChildren.map((c) => c.identifier).join(", ")})`,
+        );
+      }
+
       // Orchestration close-gate: when issue description embeds specialist agent IDs,
       // require one DONE child issue per listed specialist assignee.
       const specialistIds = Array.from(
@@ -563,9 +583,7 @@ export function issueRoutes(db: Db, storage: StorageService) {
       const requiresGitProof = (existing.description ?? "").includes("GIT DELIVERY RULE (MANDATORY)");
       if (requiresGitProof) {
         const comments = await svc.listComments(existing.id);
-        const bodies = comments.map((c) => (c.body ?? "")).join("
-
-");
+        const bodies = comments.map((c) => (c.body ?? "")).join("\n\n");
         const hasBranch = /branch\s*[:=-]\s*\S+/i.test(bodies) || /branch/i.test(bodies);
         const hasCommit = /[0-9a-f]{7,40}/i.test(bodies) || /commit\s*(hash)?\s*[:=-]/i.test(bodies);
         const hasPush = /push\s*(result)?\s*[:=-]/i.test(bodies) || /(pushed|origin\/|remote)/i.test(bodies);
