@@ -525,6 +525,39 @@ export function issueRoutes(db: Db, storage: StorageService) {
         }
         logger.info({ issueId: existing.id, identifier: existing.identifier, workspaceCwd, requiredPaths }, "close-gate passed; allowing done transition");
       }
+
+      // Orchestration close-gate: when issue description embeds specialist agent IDs,
+      // require one DONE child issue per listed specialist assignee.
+      const specialistIds = Array.from(
+        new Set(
+          (existing.description ?? "")
+            .match(/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/gi) ?? [],
+        ),
+      );
+      if (specialistIds.length > 0) {
+        const children = await svc.list(existing.companyId, { parentId: existing.id });
+        const missingSpecialists = specialistIds.filter(
+          (specialistId) =>
+            !children.some(
+              (child) => child.assigneeAgentId === specialistId && child.status === "done",
+            ),
+        );
+        logger.info(
+          {
+            issueId: existing.id,
+            identifier: existing.identifier,
+            specialistIds,
+            childCount: children.length,
+            missingSpecialists,
+          },
+          "orchestration close-gate specialist coverage check",
+        );
+        if (missingSpecialists.length > 0) {
+          throw unprocessable(
+            `Cannot close issue: missing DONE child issues for specialist agents (${missingSpecialists.join(", ")})`,
+          );
+        }
+      }
     }
 
     const { comment: commentBody, hiddenAt: hiddenAtRaw, ...updateFields } = req.body;
