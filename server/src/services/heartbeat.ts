@@ -1279,11 +1279,12 @@ export function heartbeatService(db: Db) {
       sessionCodec.deserialize(taskSessionForRun?.sessionParamsJson ?? null),
     );
     const config = parseObject(agent.adapterConfig);
-    const executionWorkspaceMode = resolveExecutionWorkspaceMode({
+    const resolvedWorkspaceMode = resolveExecutionWorkspaceMode({
       projectPolicy: projectExecutionWorkspacePolicy,
       issueSettings: issueExecutionWorkspaceSettings,
       legacyUseProjectWorkspace: issueAssigneeOverrides?.useProjectWorkspace ?? null,
     });
+    const executionWorkspaceMode = executionProjectId ? "project_primary" : resolvedWorkspaceMode;
     const resolvedWorkspace = await resolveWorkspaceForRun(
       agent,
       context,

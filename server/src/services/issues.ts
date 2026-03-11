@@ -665,6 +665,18 @@ export function issueService(db: Db) {
               parseProjectExecutionWorkspacePolicy(project?.executionWorkspacePolicy),
             ) as Record<string, unknown> | null;
         }
+        if (issueData.projectId) {
+          executionWorkspaceSettings = {
+            ...(executionWorkspaceSettings ?? {}),
+            mode: "project_primary",
+          };
+        }
+        const normalizedAssigneeOverrides = issueData.projectId
+          ? {
+              ...((issueData.assigneeAdapterOverrides as Record<string, unknown> | null | undefined) ?? {}),
+              useProjectWorkspace: true,
+            }
+          : issueData.assigneeAdapterOverrides;
         const [company] = await tx
           .update(companies)
           .set({ issueCounter: sql`${companies.issueCounter} + 1` })
@@ -676,11 +688,12 @@ export function issueService(db: Db) {
 
         const values = {
           ...issueData,
-          goalId: resolveIssueGoalId({
+goalId: resolveIssueGoalId({
             projectId: issueData.projectId,
             goalId: issueData.goalId,
             defaultGoalId: defaultCompanyGoal?.id ?? null,
           }),
+          ...(normalizedAssigneeOverrides !== undefined ? { assigneeAdapterOverrides: normalizedAssigneeOverrides } : {}),
           ...(executionWorkspaceSettings ? { executionWorkspaceSettings } : {}),
           companyId,
           issueNumber,
@@ -723,6 +736,21 @@ export function issueService(db: Db) {
         ...issueData,
         updatedAt: new Date(),
       };
+
+      const nextProjectId = issueData.projectId !== undefined ? issueData.projectId : existing.projectId;
+      if (nextProjectId) {
+        const currentSettings =
+          (issueData.executionWorkspaceSettings as Record<string, unknown> | null | undefined) ??
+          (existing.executionWorkspaceSettings as Record<string, unknown> | null | undefined) ??
+          {};
+        patch.executionWorkspaceSettings = { ...currentSettings, mode: "project_primary" };
+
+        const currentOverrides =
+          (issueData.assigneeAdapterOverrides as Record<string, unknown> | null | undefined) ??
+          (existing.assigneeAdapterOverrides as Record<string, unknown> | null | undefined) ??
+          {};
+        patch.assigneeAdapterOverrides = { ...currentOverrides, useProjectWorkspace: true };
+      }
 
       const nextAssigneeAgentId =
         issueData.assigneeAgentId !== undefined ? issueData.assigneeAgentId : existing.assigneeAgentId;
