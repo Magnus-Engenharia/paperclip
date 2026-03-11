@@ -558,6 +558,35 @@ export function issueRoutes(db: Db, storage: StorageService) {
           );
         }
       }
+
+      // Git proof close-gate: if issue requires git delivery rule, require comment evidence.
+      const requiresGitProof = (existing.description ?? "").includes("GIT DELIVERY RULE (MANDATORY)");
+      if (requiresGitProof) {
+        const comments = await svc.listComments(existing.id);
+        const bodies = comments.map((c) => (c.body ?? "")).join("
+
+");
+        const hasBranch = /branch\s*[:=-]\s*\S+/i.test(bodies) || /branch/i.test(bodies);
+        const hasCommit = /[0-9a-f]{7,40}/i.test(bodies) || /commit\s*(hash)?\s*[:=-]/i.test(bodies);
+        const hasPush = /push\s*(result)?\s*[:=-]/i.test(bodies) || /(pushed|origin\/|remote)/i.test(bodies);
+        logger.info(
+          {
+            issueId: existing.id,
+            identifier: existing.identifier,
+            requiresGitProof,
+            hasBranch,
+            hasCommit,
+            hasPush,
+            commentCount: comments.length,
+          },
+          "git-proof close-gate check",
+        );
+        if (!(hasBranch && hasCommit && hasPush)) {
+          throw unprocessable(
+            "Cannot close issue: missing git proof in comments (branch + commit hash + push result required)",
+          );
+        }
+      }
     }
 
     const { comment: commentBody, hiddenAt: hiddenAtRaw, ...updateFields } = req.body;
