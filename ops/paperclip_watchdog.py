@@ -136,6 +136,27 @@ def code_first_nudge():
         })
 
 
+
+
+def hygiene_check(summary):
+    import subprocess
+    repo='/Users/magnuseng/Projects/pet-care'
+    try:
+        out=subprocess.check_output(['git','status','--porcelain'],cwd=repo,text=True,stderr=subprocess.STDOUT)
+    except Exception:
+        return
+    bad=[]
+    for ln in out.splitlines():
+        parts=ln.split()
+        if len(parts)<2:
+            continue
+        path=parts[-1]
+        if path.startswith('node_modules/') or path.endswith('.DS_Store') or path.startswith('.acpx/') or path.startswith('.cursor/'):
+            bad.append(path)
+    if bad:
+        summary.append(f"- hygiene warning: forbidden dirty paths present ({', '.join(sorted(set(bad))[:6])})")
+
+
 def post_watchdog_comment(summary_lines):
     issues=req(f'/api/companies/{COMPANY}/issues')
     epic=next((i for i in issues if i.get('identifier')=='ENG-43'), None)
@@ -168,6 +189,8 @@ def main():
             summary.append(f'- {name}: auto-healed failed run')
 
     enforce_progress_sla(summary)
+
+    hygiene_check(summary)
 
     code_first_nudge()
     summary.append('- code-first nudges sent (ENG-45 priority)')
