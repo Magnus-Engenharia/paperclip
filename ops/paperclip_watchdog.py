@@ -58,6 +58,14 @@ def parse_dt(s):
     except Exception:
         return None
 
+
+
+def has_code_proof(comments):
+    import re
+    bodies = "\n\n".join([(c.get('body') or '') for c in comments])
+    paths = re.findall(r"(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+", bodies)
+    return any((not p.startswith('Doc/') and not p.startswith('docs/') and not p.endswith('.md')) for p in paths)
+
 def enforce_progress_sla(summary):
     issues=req(f'/api/companies/{COMPANY}/issues')
     now=datetime.datetime.now(datetime.timezone.utc)
@@ -68,10 +76,14 @@ def enforce_progress_sla(summary):
         mins=(now-upd).total_seconds()/60.0
         if mins < 60: continue
         comments=list_comments(i['id'])
-        if len(comments)==0:
-            # invalid cycle: no evidence/comment progress
+        desc=(i.get('description') or '')
+        impl_required = 'IMPLEMENTATION TASK (CODE REQUIRED)' in desc
+        missing_progress = (len(comments)==0)
+        missing_code_proof = impl_required and (not has_code_proof(comments))
+        if missing_progress or missing_code_proof:
+            reason = 'no progress comment/evidence' if missing_progress else 'no non-doc code proof in comments'
             body=(
-                f"AUTO-SLA: issue stale for {int(mins)}m with no progress comment/evidence. "
+                f"AUTO-SLA: issue stale for {int(mins)}m with {reason}. "
                 f"Marking blocked and reassigning to backup engineer for continuity."
             )
             try:
@@ -165,6 +177,20 @@ def main():
     p=[i for i in issues if i.get('projectId')==PETCARE_PROJECT]
     counts={s:sum(1 for i in p if i.get('status')==s) for s in ['todo','in_progress','done','blocked']}
     summary.append(f"- Pet Care counts: todo={counts['todo']} in_progress={counts['in_progress']} done={counts['done']} blocked={counts['blocked']}")
+
+    # docs-only task freeze for Pet Care while implementation tasks remain active
+    pet_impl_active = [i for i in issues if i.get('projectId')==PETCARE_PROJECT and i.get('status') in ('todo','in_progress') and 'IMPLEMENTATION TASK (CODE REQUIRED)' in (i.get('description') or '')]
+    if pet_impl_active:
+        for i in issues:
+            if i.get('projectId')!=PETCARE_PROJECT: continue
+            title=(i.get('title') or '').lower()
+            if i.get('status') in ('todo','in_progress') and ('report' in title or 'documentation' in title or title.startswith('doc:')) and 'IMPLEMENTATION TASK (CODE REQUIRED)' not in (i.get('description') or ''):
+                try:
+                    req(f"/api/issues/{i['id']}",'PATCH',{'status':'blocked'})
+                    req(f"/api/issues/{i['id']}/comments",'POST',{'body':'AUTO-POLICY: blocked docs-only task until implementation code tasks deliver non-doc code changes.'})
+                    summary.append(f"- docs-only task blocked: {i.get('identifier')}")
+                except Exception:
+                    pass
 
     post_watchdog_comment(summary)
     print('watchdog: ok')
