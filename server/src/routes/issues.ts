@@ -608,6 +608,21 @@ export function issueRoutes(db: Db, storage: StorageService) {
           );
         }
       }
+
+
+      const isExperiment = (existing.description ?? "").includes("EXPERIMENT ISSUE (MANDATORY)");
+      if (isExperiment) {
+        const comments = await svc.listComments(existing.id);
+        const bodies = comments.map((c) => (c.body ?? "")).join("\n\n");
+        const hasBaseline = /baseline\s*[:=-]/i.test(bodies);
+        const hasPost = /post(?:-change)?\s*[:=-]/i.test(bodies);
+        const hasMethod = /method\s*[:=-]/i.test(bodies) || /command\s*[:=-]/i.test(bodies);
+        const hasDecision = /decision\s*[:=-]/i.test(bodies);
+        logger.info({ issueId: existing.id, identifier: existing.identifier, hasBaseline, hasPost, hasMethod, hasDecision }, "experiment close-gate check");
+        if (!(hasBaseline && hasPost && hasMethod && hasDecision)) {
+          throw unprocessable("Cannot close experiment issue: missing metric evidence (baseline + post-change + method/command + decision required in comments)");
+        }
+      }
     }
 
     const { comment: commentBody, hiddenAt: hiddenAtRaw, ...updateFields } = req.body;
