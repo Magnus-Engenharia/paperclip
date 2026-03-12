@@ -153,8 +153,28 @@ def hygiene_check(summary):
         path=parts[-1]
         if path.startswith('node_modules/') or path.endswith('.DS_Store') or path.startswith('.acpx/') or path.startswith('.cursor/'):
             bad.append(path)
-    if bad:
-        summary.append(f"- hygiene warning: forbidden dirty paths present ({', '.join(sorted(set(bad))[:6])})")
+    if not bad:
+        return
+
+    bad_unique=sorted(set(bad))
+    summary.append(f"- hygiene BLOCK: forbidden dirty paths present ({', '.join(bad_unique[:6])})")
+
+    # hard enforcement: block active implementation issues until hygiene is fixed
+    try:
+        issues=req(f'/api/companies/{COMPANY}/issues')
+        active_impl=[i for i in issues if i.get('projectId')==PETCARE_PROJECT and i.get('status') in ('todo','in_progress') and 'IMPLEMENTATION TASK (CODE REQUIRED)' in (i.get('description') or '')]
+        for i in active_impl:
+            try:
+                req(f"/api/issues/{i['id']}",'PATCH',{'status':'blocked'})
+                msg=(
+                    "AUTO-HYGIENE-BLOCK: forbidden dirty paths detected in repo "
+                    f"({', '.join(bad_unique[:10])}). Fix hygiene (.gitignore/cleanup) before resuming implementation."
+                )
+                req(f"/api/issues/{i['id']}/comments",'POST',{'body':msg})
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 def post_watchdog_comment(summary_lines):
