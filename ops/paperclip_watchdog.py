@@ -4,6 +4,8 @@ import json, urllib.request, urllib.error, subprocess, datetime, time
 API='http://127.0.0.1:3100'
 COMPANY='52eb280e-3861-40d9-b59c-1a68731c536b'
 PETCARE_PROJECT='02fa3069-ff7b-4a41-860b-28efed82fda2'
+PRIMARY_ENGINEER='d87cb15d-2076-4af2-ada9-1fd219738ab5'
+BACKUP_ENGINEER='4e462c03-d19c-4055-bb3a-1da36e5cde0e'
 AGENTS={
   'CTO':'bf4404a1-153d-4f82-988b-6a1b55b02f68',
   'Cursor Engineer':'d87cb15d-2076-4af2-ada9-1fd219738ab5',
@@ -43,6 +45,54 @@ def latest_run(company, agent_id):
         if r.get('agentId')==agent_id:
             return r
     return None
+
+def list_comments(issue_id):
+    try:
+        return req(f'/api/issues/{issue_id}/comments')
+    except Exception:
+        return []
+
+def parse_dt(s):
+    try:
+        return datetime.datetime.fromisoformat((s or '').replace('Z','+00:00'))
+    except Exception:
+        return None
+
+def enforce_progress_sla(summary):
+    issues=req(f'/api/companies/{COMPANY}/issues')
+    now=datetime.datetime.now(datetime.timezone.utc)
+    pet=[i for i in issues if i.get('projectId')==PETCARE_PROJECT and i.get('status')=='in_progress']
+    for i in pet:
+        upd=parse_dt(i.get('updatedAt'))
+        if not upd: continue
+        mins=(now-upd).total_seconds()/60.0
+        if mins < 60: continue
+        comments=list_comments(i['id'])
+        if len(comments)==0:
+            # invalid cycle: no evidence/comment progress
+            body=(
+                f"AUTO-SLA: issue stale for {int(mins)}m with no progress comment/evidence. "
+                f"Marking blocked and reassigning to backup engineer for continuity."
+            )
+            try:
+                req(f"/api/issues/{i['id']}/comments",'POST',{'body':body})
+            except Exception:
+                pass
+            # reassign engineer lanes only
+            assignee=i.get('assigneeAgentId')
+            if assignee==PRIMARY_ENGINEER:
+                req(f"/api/issues/{i['id']}",'PATCH',{'status':'blocked','assigneeAgentId':BACKUP_ENGINEER})
+                try: req(f'/api/agents/{BACKUP_ENGINEER}/wakeup','POST',{'source':'automation','triggerDetail':'system','reason':f'SLA escalation for {i.get("identifier")}'} )
+                except Exception: pass
+                summary.append(f"- SLA escalation: {i.get('identifier')} -> backup engineer")
+            elif assignee==BACKUP_ENGINEER:
+                req(f"/api/issues/{i['id']}",'PATCH',{'status':'blocked','assigneeAgentId':PRIMARY_ENGINEER})
+                try: req(f'/api/agents/{PRIMARY_ENGINEER}/wakeup','POST',{'source':'automation','triggerDetail':'system','reason':f'SLA escalation for {i.get("identifier")}'} )
+                except Exception: pass
+                summary.append(f"- SLA escalation: {i.get('identifier')} -> primary engineer")
+            else:
+                req(f"/api/issues/{i['id']}",'PATCH',{'status':'blocked'})
+                summary.append(f"- SLA blocked (non-engineer assignee): {i.get('identifier')}")
 
 
 def heal_failed_agent(agent_id, reason):
@@ -104,6 +154,8 @@ def main():
         if status=='failed' or 'unknown option' in err or 'connection refused' in err:
             heal_failed_agent(aid, f'watchdog auto-heal for {name}: {r.get("error") or "failed run"}')
             summary.append(f'- {name}: auto-healed failed run')
+
+    enforce_progress_sla(summary)
 
     code_first_nudge()
     summary.append('- code-first nudges sent (ENG-45 priority)')
