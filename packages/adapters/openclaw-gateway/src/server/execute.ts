@@ -1065,6 +1065,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   const templateMessage = nonEmpty(payloadTemplate.message) ?? nonEmpty(payloadTemplate.text);
   const message = templateMessage ? appendWakeText(templateMessage, wakeText) : wakeText;
+  const includePaperclipEnvelope = parseBoolean(ctx.config.includePaperclipEnvelope, false);
   const paperclipPayload = buildStandardPaperclipPayload(ctx, wakePayload, paperclipEnv, payloadTemplate);
 
   const agentParams: Record<string, unknown> = {
@@ -1073,6 +1074,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     sessionKey,
     idempotencyKey: ctx.runId,
   };
+  if (includePaperclipEnvelope) {
+    agentParams.paperclip = paperclipPayload;
+  }
   delete agentParams.text;
 
   const configuredAgentId = nonEmpty(ctx.config.agentId);

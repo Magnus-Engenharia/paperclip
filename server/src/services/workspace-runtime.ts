@@ -82,6 +82,34 @@ const runtimeServicesByReuseKey = new Map<string, string>();
 const runtimeServiceLeasesByRun = new Map<string, string[]>();
 
 
+const DANGEROUS_COMMAND_PATTERNS: RegExp[] = [
+  /rm\s+-rf\s+\//i,
+  /mkfs(?:\.|\s)/i,
+  /shutdown/i,
+  /reboot/i,
+  /sudo/i,
+  /nc[^\n]*\s-e/i,
+  /\/dev\/tcp\//i,
+  /curl[^\n]*\|\s*(bash|sh)/i,
+  /wget[^\n]*\|\s*(bash|sh)/i,
+];
+
+function assertSafeCommandForWorkspaceRuntime(command: string, context: string) {
+  if (process.env.PAPERCLIP_RUNTIME_ALLOW_UNSAFE_COMMANDS === "true") return;
+  const trimmed = command.trim();
+  if (!trimmed) throw new Error(`${context} is empty`);
+  for (const pattern of DANGEROUS_COMMAND_PATTERNS) {
+    if (pattern.test(trimmed)) {
+      throw new Error(
+        `${context} blocked by runtime command safety policy (${pattern.toString()}). ` +
+          "Set PAPERCLIP_RUNTIME_ALLOW_UNSAFE_COMMANDS=true to override explicitly.",
+      );
+    }
+  }
+}
+
+
+
 const SAFE_BASE_ENV_KEYS = [
   "PATH",
   "HOME",
@@ -301,6 +329,7 @@ async function runWorkspaceCommand(input: {
   env: NodeJS.ProcessEnv;
   label: string;
 }) {
+  assertSafeCommandForWorkspaceRuntime(input.command, input.label);
   const shell = process.env.SHELL?.trim() || "/bin/sh";
   const proc = await new Promise<{ stdout: string; stderr: string; code: number | null }>((resolve, reject) => {
     const child = spawn(shell, ["-c", input.command], {
@@ -746,6 +775,7 @@ async function startLocalRuntimeService(input: {
     const portEnvKey = asString(portConfig.envKey, "PORT");
     env[portEnvKey] = String(port);
   }
+  assertSafeCommandForWorkspaceRuntime(command, `Runtime service "${serviceName}" command`);
   const shell = process.env.SHELL?.trim() || "/bin/sh";
   const child = spawn(shell, ["-lc", command], {
     cwd: serviceCwd,
