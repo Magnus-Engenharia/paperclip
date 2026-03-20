@@ -131,10 +131,24 @@ function resolveSessionKey(input: {
   configuredSessionKey: string | null;
   runId: string;
   issueId: string | null;
+  agentId: string | null;
 }): string {
-  const fallback = input.configuredSessionKey ?? "paperclip";
-  if (input.strategy === "run") return `paperclip:run:${input.runId}`;
-  if (input.strategy === "issue" && input.issueId) return `paperclip:issue:${input.issueId}`;
+  const normalizedAgentId = nonEmpty(input.agentId);
+  const fallback =
+    input.configuredSessionKey ?? (normalizedAgentId ? `agent:${normalizedAgentId}:paperclip` : "paperclip");
+
+  if (input.strategy === "run") {
+    return normalizedAgentId
+      ? `agent:${normalizedAgentId}:run:${input.runId}`
+      : `paperclip:run:${input.runId}`;
+  }
+
+  if (input.strategy === "issue" && input.issueId) {
+    return normalizedAgentId
+      ? `agent:${normalizedAgentId}:issue:${input.issueId}`
+      : `paperclip:issue:${input.issueId}`;
+  }
+
   return fallback;
 }
 
@@ -1057,11 +1071,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   const sessionKeyStrategy = normalizeSessionKeyStrategy(ctx.config.sessionKeyStrategy);
   const configuredSessionKey = nonEmpty(ctx.config.sessionKey);
+  const resolvedAgentId = nonEmpty(payloadTemplate.agentId) ?? nonEmpty(ctx.config.agentId);
   const sessionKey = resolveSessionKey({
     strategy: sessionKeyStrategy,
     configuredSessionKey,
     runId: ctx.runId,
     issueId: wakePayload.issueId,
+    agentId: resolvedAgentId,
   });
 
   const templateMessage = nonEmpty(payloadTemplate.message) ?? nonEmpty(payloadTemplate.text);
