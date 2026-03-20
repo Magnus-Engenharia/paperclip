@@ -488,6 +488,10 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
   });
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+}
+
 function derivePublicKeyRaw(publicKeyPem: string): Buffer {
   const key = crypto.createPublicKey(publicKeyPem);
   const spki = key.export({ type: "spki", format: "der" }) as Buffer;
@@ -1107,6 +1111,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const autoPairOnFirstConnect = parseBoolean(ctx.config.autoPairOnFirstConnect, true);
   let autoPairAttempted = false;
   let latestResultPayload: unknown = null;
+  let rateLimitRetries = 0;
 
   while (true) {
     const trackedRunIds = new Set<string>([ctx.runId]);
@@ -1308,6 +1313,35 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             resultJson: waitPayload,
           };
         }
+      }
+
+      if (lifecycleError) {
+        const lowerLifecycle = lifecycleError.toLowerCase();
+        const isRateLimited =
+          lowerLifecycle.includes("rate limit") ||
+          lowerLifecycle.includes("too many requests") ||
+          lowerLifecycle.includes("429");
+
+        if (isRateLimited && rateLimitRetries < 2) {
+          rateLimitRetries += 1;
+          const backoffMs = 2_000 * rateLimitRetries;
+          await ctx.onLog(
+            "stdout",
+            `[openclaw-gateway] rate limit detected; retrying run (attempt ${rateLimitRetries}/2) after ${backoffMs}ms
+`,
+          );
+          await sleep(backoffMs);
+          continue;
+        }
+
+        return {
+          exitCode: 1,
+          signal: null,
+          timedOut: false,
+          errorMessage: lifecycleError,
+          errorCode: isRateLimited ? "openclaw_gateway_rate_limited" : "openclaw_gateway_lifecycle_error",
+          resultJson: asRecord(latestResultPayload) ?? asRecord(acceptedPayload),
+        };
       }
 
       const summaryFromEvents = assistantChunks.join("").trim();
