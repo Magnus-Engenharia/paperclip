@@ -1902,6 +1902,11 @@ export function agentRoutes(db: Db) {
       return;
     }
 
+    const payloadIssueId =
+      req.body.payload && typeof req.body.payload === "object" && typeof (req.body.payload as Record<string, unknown>).issueId === "string"
+        ? ((req.body.payload as Record<string, unknown>).issueId as string)
+        : null;
+
     const run = await heartbeat.wakeup(id, {
       source: req.body.source,
       triggerDetail: req.body.triggerDetail ?? "manual",
@@ -1914,6 +1919,7 @@ export function agentRoutes(db: Db) {
         triggeredBy: req.actor.type,
         actorId: req.actor.type === "agent" ? req.actor.agentId : req.actor.userId,
         forceFreshSession: req.body.forceFreshSession === true,
+        ...(payloadIssueId ? { issueId: payloadIssueId, taskId: payloadIssueId } : {}),
       },
     });
 
