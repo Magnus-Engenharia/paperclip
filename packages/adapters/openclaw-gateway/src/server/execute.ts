@@ -350,7 +350,6 @@ function buildPaperclipEnvForWake(ctx: AdapterExecutionContext, wakePayload: Wak
 }
 
 function buildWakeText(payload: WakePayload, paperclipEnv: Record<string, string>): string {
-  const claimedApiKeyPath = "~/.openclaw/workspace/paperclip-claimed-api-key.json";
   const orderedKeys = [
     "PAPERCLIP_RUN_ID",
     "PAPERCLIP_AGENT_ID",
@@ -371,56 +370,22 @@ function buildWakeText(payload: WakePayload, paperclipEnv: Record<string, string
     envLines.push(`${key}=${value}`);
   }
 
-  const issueIdHint = payload.taskId ?? payload.issueId ?? "";
-  const apiBaseHint = paperclipEnv.PAPERCLIP_API_URL ?? "<set PAPERCLIP_API_URL>";
-
   const lines = [
-    "Paperclip wake event for a cloud adapter.",
+    "Paperclip wake event.",
     "",
-    "Run this procedure now. Do not guess undocumented endpoints and do not ask for additional heartbeat docs.",
+    "Use the issue/context provided in this prompt and execute your role-specific workflow.",
+    "Do NOT access local secret files or paths such as paperclip-claimed-api-key.json.",
+    "Do NOT request or load API keys from disk.",
     "",
-    "Set these values in your run context:",
+    "Run context:",
     ...envLines,
-    `PAPERCLIP_API_KEY=<token from ${claimedApiKeyPath}>`,
     "",
-    `Load PAPERCLIP_API_KEY from ${claimedApiKeyPath} (the token you saved after claim-api-key).`,
-    "",
-    `api_base=${apiBaseHint}`,
-    `task_id=${payload.taskId ?? ""}`,
-    `issue_id=${payload.issueId ?? ""}`,
-    `wake_reason=${payload.wakeReason ?? ""}`,
-    `wake_comment_id=${payload.wakeCommentId ?? ""}`,
-    `approval_id=${payload.approvalId ?? ""}`,
-    `approval_status=${payload.approvalStatus ?? ""}`,
-    `linked_issue_ids=${payload.issueIds.join(",")}`,
-    "",
-    "HTTP rules:",
-    "- Use Authorization: Bearer $PAPERCLIP_API_KEY on every API call.",
-    "- Use X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID on every mutating API call.",
-    "- Use only /api endpoints listed below.",
-    "- Do NOT call guessed endpoints like /api/cloud-adapter/*, /api/cloud-adapters/*, /api/adapters/cloud/*, or /api/heartbeat.",
-    "",
-    "Workflow:",
-    "1) GET /api/agents/me",
-    `2) Determine issueId: PAPERCLIP_TASK_ID if present, otherwise issue_id (${issueIdHint}).`,
-    "3) If issueId exists:",
-    "   - POST /api/issues/{issueId}/checkout with {\"agentId\":\"$PAPERCLIP_AGENT_ID\",\"expectedStatuses\":[\"todo\",\"backlog\",\"blocked\"]}",
-    "   - GET /api/issues/{issueId}",
-    "   - GET /api/issues/{issueId}/comments",
-    "   - Execute the issue instructions exactly.",
-    "   - If instructions require a comment, POST /api/issues/{issueId}/comments with {\"body\":\"...\"}.",
-    "   - PATCH /api/issues/{issueId} with {\"status\":\"done\",\"comment\":\"what changed and why\"}.",
-    "4) If issueId does not exist:",
-    "   - GET /api/companies/$PAPERCLIP_COMPANY_ID/issues?assigneeAgentId=$PAPERCLIP_AGENT_ID&status=todo,in_progress,blocked",
-    "   - Pick in_progress first, then todo, then blocked, then execute step 3.",
-    "",
-    "Useful endpoints for issue work:",
-    "- POST /api/issues/{issueId}/comments",
-    "- PATCH /api/issues/{issueId}",
-    "- POST /api/companies/{companyId}/issues (when asked to create a new issue)",
-    "",
-    "Complete the workflow in this run.",
+    "Expected behavior:",
+    "- CTO: decompose goals into executable tasks and delegate to engineers.",
+    "- Engineers: execute assigned tasks and report progress/blockers.",
+    "- Keep output concise and action-oriented.",
   ];
+
   return lines.join("\n");
 }
 
