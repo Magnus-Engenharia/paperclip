@@ -385,8 +385,9 @@ function buildWakeText(payload: WakePayload, paperclipEnv: Record<string, string
     "- Do not auto-close issues from planning text only.",
     "- If blocked or no execution evidence, keep status in_progress/blocked and explain why.",
     "- Use agent-authored updates (avoid local-board style write paths).",
-    "- If PAPERCLIP_TASK_ID is present, execute ONLY that task; do not switch to other MAG issues.",
-    "- Never run bootstrap/identity setup during issue execution.",
+    "- If PAPERCLIP_TASK_ID is present, focus on that task; you may also work on other tasks if appropriate.",
+    "- If no PAPERCLIP_TASK_ID is provided, work freely on whatever is needed.",
+    "- Never run bootstrap/identity setup during execution.",
     "",
     "Expected behavior:",
     "- CTO: decompose goals into executable tasks and delegate to engineers.",
@@ -1047,16 +1048,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const wakeText = buildWakeText(wakePayload, paperclipEnv);
 
   const sessionKeyStrategy = normalizeSessionKeyStrategy(ctx.config.sessionKeyStrategy);
-  if (sessionKeyStrategy === "issue" && !wakePayload.issueId) {
-    return {
-      exitCode: 1,
-      signal: null,
-      timedOut: false,
-      errorMessage: "Issue-bound execution requires wakePayload.issueId, but it was missing.",
-      errorCode: "openclaw_gateway_missing_issue_context",
-      resultJson: { wakePayload },
-    };
-  }
   const configuredSessionKey = nonEmpty(ctx.config.sessionKey);
   const resolvedAgentId = nonEmpty(payloadTemplate.agentId) ?? nonEmpty(ctx.config.agentId);
   const sessionKey = resolveSessionKey({
@@ -1328,7 +1319,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       }
 
       if (lifecycleError) {
-        const lowerLifecycle = lifecycleError.toLowerCase();
+        const lowerLifecycle = String(lifecycleError).toLowerCase();
         const isRateLimited =
           lowerLifecycle.includes("rate limit") ||
           lowerLifecycle.includes("too many requests") ||
