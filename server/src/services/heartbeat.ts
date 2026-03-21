@@ -2573,6 +2573,22 @@ export function heartbeatService(db: Db) {
         logCompressed: logSummary?.compressed ?? false,
       });
 
+      // Post agent output as comment on issue for successful runs
+      if (outcome === "succeeded" && issueId && adapterResult.summary) {
+        try {
+          await issuesSvc.addComment(
+            issueId,
+            `## Agent Execution Complete\n\n${adapterResult.summary}`,
+            { agentId: agent.id },
+          );
+        } catch (err) {
+          await onLog(
+            "stderr",
+            `[paperclip] Failed to post agent output comment: ${err instanceof Error ? err.message : String(err)}\n`,
+          );
+        }
+      }
+
       await setWakeupStatus(run.wakeupRequestId, outcome === "succeeded" ? "completed" : status, {
         finishedAt: new Date(),
         error: outcomeErrorMessage ?? adapterResult.errorMessage ?? null,
