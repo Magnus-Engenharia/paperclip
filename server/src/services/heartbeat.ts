@@ -2492,9 +2492,12 @@ export function heartbeatService(db: Db) {
             limit: 200,
           }).catch(() => []),
         ]);
+        const terminalStatuses = new Set(["done", "cancelled"]);
+        const isTerminal = terminalStatuses.has(issueAfter?.status ?? "") || terminalStatuses.has(issueStatusBaseline ?? "");
         const statusChanged = !!(issueStatusBaseline && issueAfter?.status && issueAfter.status !== issueStatusBaseline);
         const agentCommentAdded = newComments.some((c) => c.authorAgentId === agent.id);
-        if (!statusChanged && !agentCommentAdded) {
+        // Skip mutation validation if issue is already in terminal state
+        if (!isTerminal && !statusChanged && !agentCommentAdded) {
           outcome = "failed";
           outcomeErrorMessage =
             "Issue-bound run produced no issue mutation (no agent comment and no status change).";
