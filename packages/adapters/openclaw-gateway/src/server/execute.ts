@@ -126,15 +126,57 @@ function normalizeSessionKeyStrategy(value: unknown): SessionKeyStrategy {
   return "issue";
 }
 
+// Helper: Post acknowledgment comment to issue
+async function postAcknowledgmentComment(ctx: AdapterExecutionContext, issueId: string, apiUrl: string | null, apiKey: string | null): Promise<boolean> {
+  if (!apiUrl || !apiKey) return false;
+  
+  const ackText = `Acknowledged: Issue #${issueId}. Starting work now.`;
+  
+  try {
+    const response = await fetch(`${apiUrl}/api/issues/${issueId}/comments`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`,
+        "X-Paperclip-Run-Id": ctx.runId,
+      },
+      body: JSON.stringify({ body: ackText }),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+// Helper: Format result using template
+function formatResult(template: string | null, data: Record<string, unknown>): string {
+  if (!template) {
+    // Default format
+    const lines = ["## Results"];
+    for (const [key, value] of Object.entries(data)) {
+      lines.push(`- **${key}**: ${value}`);
+    }
+    return lines.join("\n");
+  }
+  
+  // Simple template substitution
+  let result = template;
+  for (const [key, value] of Object.entries(data)) {
+    result = result.replace(new RegExp(`\{${key}\}`, 'g'), String(value));
+  }
+  return result;
+}
+
 function resolveSessionKey(input: {
   strategy: SessionKeyStrategy;
   configuredSessionKey: string | null;
   runId: string;
   issueId: string | null;
+  agentId: string;
 }): string {
-  const fallback = input.configuredSessionKey ?? "paperclip";
-  if (input.strategy === "run") return `paperclip:run:${input.runId}`;
-  if (input.strategy === "issue" && input.issueId) return `paperclip:issue:${input.issueId}`;
+  const fallback = input.configuredSessionKey ?? `agent:${input.agentId}:main`;
+  if (input.strategy === "run") return `agent:${input.agentId}:run:${input.runId}`;
+  if (input.strategy === "issue" && input.issueId) return `agent:${input.agentId}:issue:${input.issueId}`;
   return fallback;
 }
 
@@ -383,6 +425,10 @@ function buildWakeText(payload: WakePayload, paperclipEnv: Record<string, string
     "HTTP rules:",
     "- Use Authorization: Bearer $PAPERCLIP_API_KEY on every API call.",
     "- Use X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID on every mutating API call.",
+    "- Optional config options:",
+    "  - autoAcknowledge: true - post acknowledgment comment when starting work",
+    "  - resultTemplate: string - template for formatting results (e.g., '## Results\n- Task: {task}\n- Status: {status}')",
+    "  - prioritySelection: 'highest' | 'lowest' - how to pick issue when multiple available (default: highest)",
     "- Use only /api endpoints listed below.",
     "- Do NOT call guessed endpoints like /api/cloud-adapter/*, /api/cloud-adapters/*, /api/adapters/cloud/*, or /api/heartbeat.",
     "",
@@ -391,14 +437,16 @@ function buildWakeText(payload: WakePayload, paperclipEnv: Record<string, string
     `2) Determine issueId: PAPERCLIP_TASK_ID if present, otherwise issue_id (${issueIdHint}).`,
     "3) If issueId exists:",
     "   - POST /api/issues/{issueId}/checkout with {\"agentId\":\"$PAPERCLIP_AGENT_ID\",\"expectedStatuses\":[\"todo\",\"backlog\",\"blocked\"]}",
+    "   - If config.autoAcknowledge is true, POST /api/issues/{issueId}/comments with {\"body\":\"Acknowledged: Issue #{issueId}. Starting work now.\"}",
     "   - GET /api/issues/{issueId}",
     "   - GET /api/issues/{issueId}/comments",
     "   - Execute the issue instructions exactly.",
-    "   - If instructions require a comment, POST /api/issues/{issueId}/comments with {\"body\":\"...\"}.",
+    "   - If instructions require a comment, POST /api/issues/{issueId}/comments with {\"body\":\"...\"} (use config.resultTemplate for formatting)",
     "   - PATCH /api/issues/{issueId} with {\"status\":\"done\",\"comment\":\"what changed and why\"}.",
     "4) If issueId does not exist:",
     "   - GET /api/companies/$PAPERCLIP_COMPANY_ID/issues?assigneeAgentId=$PAPERCLIP_AGENT_ID&status=todo,in_progress,blocked",
-    "   - Pick in_progress first, then todo, then blocked, then execute step 3.",
+    "   - Sort by priority (high > medium > low > none), then status (in_progress > todo > blocked), then createdAt ascending",
+    "   - Pick the highest priority issue and execute step 3.",
     "",
     "Useful endpoints for issue work:",
     "- POST /api/issues/{issueId}/comments",
@@ -1062,6 +1110,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     configuredSessionKey,
     runId: ctx.runId,
     issueId: wakePayload.issueId,
+    agentId: ctx.agent.id,
   });
 
   const templateMessage = nonEmpty(payloadTemplate.message) ?? nonEmpty(payloadTemplate.text);
