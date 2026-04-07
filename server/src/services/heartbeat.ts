@@ -2319,6 +2319,7 @@ export function heartbeatService(db: Db) {
             projectWorkspaceId: issues.projectWorkspaceId,
             executionWorkspaceId: issues.executionWorkspaceId,
             executionWorkspacePreference: issues.executionWorkspacePreference,
+            status: issues.status,
             assigneeAgentId: issues.assigneeAgentId,
             assigneeAdapterOverrides: issues.assigneeAdapterOverrides,
             executionWorkspaceSettings: issues.executionWorkspaceSettings,
@@ -2327,6 +2328,11 @@ export function heartbeatService(db: Db) {
           .where(and(eq(issues.id, issueId), eq(issues.companyId, agent.companyId)))
           .then((rows) => rows[0] ?? null)
       : null;
+    const issueStatusBaseline = issueContext?.status ?? null;
+    const issueCommentCursorBaseline = issueId
+      ? await issuesSvc.getCommentCursor(issueId).catch(() => ({ totalComments: 0, latestCommentId: null as string | null, latestCommentAt: null as Date | null }))
+      : null;
+
     const issueAssigneeOverrides =
       issueContext && issueContext.assigneeAgentId === agent.id
         ? parseIssueAssigneeAdapterOverrides(
@@ -2984,6 +2990,7 @@ export function heartbeatService(db: Db) {
       const normalizedUsage = sessionUsageResolution.normalizedUsage;
 
       let outcome: "succeeded" | "failed" | "cancelled" | "timed_out";
+      let outcomeErrorMessage: string | null = null;
       const latestRun = await getRun(run.id);
       if (latestRun?.status === "cancelled") {
         outcome = "cancelled";
@@ -2993,6 +3000,27 @@ export function heartbeatService(db: Db) {
         outcome = "succeeded";
       } else {
         outcome = "failed";
+      }
+
+      if (outcome === "succeeded" && issueId) {
+        const [issueAfter, newComments] = await Promise.all([
+          issuesSvc.getById(issueId),
+          issuesSvc.listComments(issueId, {
+            afterCommentId: issueCommentCursorBaseline?.latestCommentId ?? null,
+            order: "asc",
+            limit: 200,
+          }).catch(() => []),
+        ]);
+        const terminalStatuses = new Set(["done", "cancelled"]);
+        const isTerminal = terminalStatuses.has(issueAfter?.status ?? "") || terminalStatuses.has(issueStatusBaseline ?? "");
+        const statusChanged = !!(issueStatusBaseline && issueAfter?.status && issueAfter.status !== issueStatusBaseline);
+        const agentCommentAdded = newComments.some((c) => c.authorAgentId === agent.id);
+        // Skip mutation validation if issue is already in terminal state
+        if (!isTerminal && !statusChanged && !agentCommentAdded) {
+          outcome = "failed";
+          outcomeErrorMessage =
+            "Issue-bound run produced no issue mutation (no agent comment and no status change).";
+        }
       }
 
       let logSummary: { bytes: number; sha256?: string; compressed: boolean } | null = null;
@@ -3041,7 +3069,7 @@ export function heartbeatService(db: Db) {
           outcome === "succeeded"
             ? null
             : redactCurrentUserText(
-                adapterResult.errorMessage ?? (outcome === "timed_out" ? "Timed out" : "Adapter failed"),
+                outcomeErrorMessage ?? adapterResult.errorMessage ?? (outcome === "timed_out" ? "Timed out" : "Adapter failed"),
                 currentUserRedactionOptions,
               ),
         errorCode:
@@ -3064,9 +3092,25 @@ export function heartbeatService(db: Db) {
         logCompressed: logSummary?.compressed ?? false,
       });
 
+      // Post agent output as comment on issue for successful runs
+      if (outcome === "succeeded" && issueId && adapterResult.summary) {
+        try {
+          await issuesSvc.addComment(
+            issueId,
+            `## Agent Execution Complete\n\n${adapterResult.summary}`,
+            { agentId: agent.id },
+          );
+        } catch (err) {
+          await onLog(
+            "stderr",
+            `[paperclip] Failed to post agent output comment: ${err instanceof Error ? err.message : String(err)}\n`,
+          );
+        }
+      }
+
       await setWakeupStatus(run.wakeupRequestId, outcome === "succeeded" ? "completed" : status, {
         finishedAt: new Date(),
-        error: adapterResult.errorMessage ?? null,
+        error: outcomeErrorMessage ?? adapterResult.errorMessage ?? null,
       });
 
       const finalizedRun = await getRun(run.id);

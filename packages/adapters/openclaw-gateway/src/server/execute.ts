@@ -3,14 +3,7 @@ import type {
   AdapterExecutionResult,
   AdapterRuntimeServiceReport,
 } from "@paperclipai/adapter-utils";
-import {
-  asNumber,
-  asString,
-  buildPaperclipEnv,
-  parseObject,
-  renderPaperclipWakePrompt,
-  stringifyPaperclipWakePayload,
-} from "@paperclipai/adapter-utils/server-utils";
+import { asNumber, asString, buildPaperclipEnv, parseObject } from "@paperclipai/adapter-utils/server-utils";
 import crypto, { randomUUID } from "node:crypto";
 import { WebSocket } from "ws";
 
@@ -138,10 +131,24 @@ function resolveSessionKey(input: {
   configuredSessionKey: string | null;
   runId: string;
   issueId: string | null;
+  agentId: string | null;
 }): string {
-  const fallback = input.configuredSessionKey ?? "paperclip";
-  if (input.strategy === "run") return `paperclip:run:${input.runId}`;
-  if (input.strategy === "issue" && input.issueId) return `paperclip:issue:${input.issueId}`;
+  const normalizedAgentId = nonEmpty(input.agentId);
+  const fallback =
+    input.configuredSessionKey ?? (normalizedAgentId ? `agent:${normalizedAgentId}:paperclip` : "paperclip");
+
+  if (input.strategy === "run") {
+    return normalizedAgentId
+      ? `agent:${normalizedAgentId}:run:${input.runId}`
+      : `paperclip:run:${input.runId}`;
+  }
+
+  if (input.strategy === "issue" && input.issueId) {
+    return normalizedAgentId
+      ? `agent:${normalizedAgentId}:issue:${input.issueId}`
+      : `paperclip:issue:${input.issueId}`;
+  }
+
   return fallback;
 }
 
@@ -342,12 +349,7 @@ function buildPaperclipEnvForWake(ctx: AdapterExecutionContext, wakePayload: Wak
   return paperclipEnv;
 }
 
-function buildWakeText(
-  payload: WakePayload,
-  paperclipEnv: Record<string, string>,
-  structuredWakePrompt: string,
-): string {
-  const claimedApiKeyPath = "~/.openclaw/workspace/paperclip-claimed-api-key.json";
+function buildWakeText(payload: WakePayload, paperclipEnv: Record<string, string>): string {
   const orderedKeys = [
     "PAPERCLIP_RUN_ID",
     "PAPERCLIP_AGENT_ID",
@@ -368,79 +370,37 @@ function buildWakeText(
     envLines.push(`${key}=${value}`);
   }
 
-  const issueIdHint = payload.taskId ?? payload.issueId ?? "";
-  const apiBaseHint = paperclipEnv.PAPERCLIP_API_URL ?? "<set PAPERCLIP_API_URL>";
-
   const lines = [
-    "Paperclip wake event for a cloud adapter.",
+    "Paperclip wake event.",
     "",
-    "Run this procedure now. Do not guess undocumented endpoints and do not ask for additional heartbeat docs.",
+    "Use the issue/context provided in this prompt and execute your role-specific workflow.",
+    "Do NOT access local secret files or paths such as paperclip-claimed-api-key.json.",
+    "Do NOT request or load API keys from disk.",
     "",
-    "Set these values in your run context:",
+    "Run context:",
     ...envLines,
-    `PAPERCLIP_API_KEY=<token from ${claimedApiKeyPath}>`,
     "",
-    `Load PAPERCLIP_API_KEY from ${claimedApiKeyPath} (the token you saved after claim-api-key).`,
+    "Execution guardrails:",
+    "- Never mark an issue as done unless real execution occurred for this run.",
+    "- Do not auto-close issues from planning text only.",
+    "- If blocked or no execution evidence, keep status in_progress/blocked and explain why.",
+    "- Use agent-authored updates (avoid local-board style write paths).",
+    "- If PAPERCLIP_TASK_ID is present, focus on that task; you may also work on other tasks if appropriate.",
+    "- If no PAPERCLIP_TASK_ID is provided, work freely on whatever is needed.",
+    "- Never run bootstrap/identity setup during execution.",
     "",
-    `api_base=${apiBaseHint}`,
-    `task_id=${payload.taskId ?? ""}`,
-    `issue_id=${payload.issueId ?? ""}`,
-    `wake_reason=${payload.wakeReason ?? ""}`,
-    `wake_comment_id=${payload.wakeCommentId ?? ""}`,
-    `approval_id=${payload.approvalId ?? ""}`,
-    `approval_status=${payload.approvalStatus ?? ""}`,
-    `linked_issue_ids=${payload.issueIds.join(",")}`,
-    "",
-    "HTTP rules:",
-    "- Use Authorization: Bearer $PAPERCLIP_API_KEY on every API call.",
-    "- Use X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID on every mutating API call.",
-    "- Use only /api endpoints listed below.",
-    "- Do NOT call guessed endpoints like /api/cloud-adapter/*, /api/cloud-adapters/*, /api/adapters/cloud/*, or /api/heartbeat.",
-    "",
-    "Workflow:",
-    "1) GET /api/agents/me",
-    `2) Determine issueId: PAPERCLIP_TASK_ID if present, otherwise issue_id (${issueIdHint}).`,
-    "3) If issueId exists:",
-    "   - POST /api/issues/{issueId}/checkout with {\"agentId\":\"$PAPERCLIP_AGENT_ID\",\"expectedStatuses\":[\"todo\",\"backlog\",\"blocked\",\"in_review\"]}",
-    "   - GET /api/issues/{issueId}",
-    "   - GET /api/issues/{issueId}/comments",
-    "   - Execute the issue instructions exactly.",
-    "   - If instructions require a comment, POST /api/issues/{issueId}/comments with {\"body\":\"...\"}.",
-    "   - PATCH /api/issues/{issueId} with {\"status\":\"done\",\"comment\":\"what changed and why\"}.",
-    "4) If issueId does not exist:",
-    "   - GET /api/companies/$PAPERCLIP_COMPANY_ID/issues?assigneeAgentId=$PAPERCLIP_AGENT_ID&status=todo,in_progress,in_review,blocked",
-    "   - Pick in_progress first, then in_review when you were woken by a comment, then todo, then blocked, then execute step 3.",
-    "",
-    "Useful endpoints for issue work:",
-    "- POST /api/issues/{issueId}/comments",
-    "- PATCH /api/issues/{issueId}",
-    "- POST /api/companies/{companyId}/issues (when asked to create a new issue)",
-    ...(structuredWakePrompt
-      ? [
-          "",
-          structuredWakePrompt,
-        ]
-      : []),
-    "",
-    "Complete the workflow in this run.",
+    "Expected behavior:",
+    "- CTO: decompose goals into executable tasks and delegate to engineers.",
+    "- Engineers: execute assigned tasks and report progress/blockers.",
+    "- Keep output concise and action-oriented.",
   ];
+
   return lines.join("\n");
 }
 
 function appendWakeText(baseText: string, wakeText: string): string {
   const trimmedBase = baseText.trim();
   return trimmedBase.length > 0 ? `${trimmedBase}\n\n${wakeText}` : wakeText;
-}
-
-function joinWakePayloadSections(structuredWakePrompt: string, structuredWakeJson: string): string {
-  const sections = [
-    structuredWakePrompt.trim(),
-    "Structured wake payload JSON:",
-    "```json",
-    structuredWakeJson,
-    "```",
-  ].filter((entry) => entry.trim().length > 0);
-  return sections.join("\n");
 }
 
 function buildStandardPaperclipPayload(
@@ -475,10 +435,6 @@ function buildStandardPaperclipPayload(
     approvalStatus: wakePayload.approvalStatus,
     apiUrl: paperclipEnv.PAPERCLIP_API_URL ?? null,
   };
-  const structuredWake = parseObject(ctx.context.paperclipWake);
-  if (Object.keys(structuredWake).length > 0) {
-    standardPaperclip.wake = structuredWake;
-  }
 
   if (workspace) {
     standardPaperclip.workspace = workspace;
@@ -533,6 +489,10 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
         reject(err);
       });
   });
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
 }
 
 function derivePublicKeyRaw(publicKeyPem: string): Buffer {
@@ -1085,23 +1045,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   const wakePayload = buildWakePayload(ctx);
   const paperclipEnv = buildPaperclipEnvForWake(ctx, wakePayload);
-  const structuredWakePrompt = renderPaperclipWakePrompt(ctx.context.paperclipWake);
-  const structuredWakeJson = stringifyPaperclipWakePayload(ctx.context.paperclipWake);
-  const wakeText = buildWakeText(
-    wakePayload,
-    paperclipEnv,
-    structuredWakeJson
-      ? joinWakePayloadSections(structuredWakePrompt, structuredWakeJson)
-      : structuredWakePrompt,
-  );
+  const wakeText = buildWakeText(wakePayload, paperclipEnv);
 
   const sessionKeyStrategy = normalizeSessionKeyStrategy(ctx.config.sessionKeyStrategy);
   const configuredSessionKey = nonEmpty(ctx.config.sessionKey);
+  const resolvedAgentId = nonEmpty(payloadTemplate.agentId) ?? nonEmpty(ctx.config.agentId);
   const sessionKey = resolveSessionKey({
     strategy: sessionKeyStrategy,
     configuredSessionKey,
     runId: ctx.runId,
     issueId: wakePayload.issueId,
+    agentId: resolvedAgentId,
   });
 
   const templateMessage = nonEmpty(payloadTemplate.message) ?? nonEmpty(payloadTemplate.text);
@@ -1115,7 +1069,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     idempotencyKey: ctx.runId,
   };
   delete agentParams.text;
-  agentParams.paperclip = paperclipPayload;
 
   const configuredAgentId = nonEmpty(ctx.config.agentId);
   if (configuredAgentId && !nonEmpty(agentParams.agentId)) {
@@ -1161,6 +1114,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const autoPairOnFirstConnect = parseBoolean(ctx.config.autoPairOnFirstConnect, true);
   let autoPairAttempted = false;
   let latestResultPayload: unknown = null;
+  let rateLimitRetries = 0;
 
   while (true) {
     const trackedRunIds = new Set<string>([ctx.runId]);
@@ -1364,7 +1318,56 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         }
       }
 
+      if (lifecycleError) {
+        const lowerLifecycle = String(lifecycleError).toLowerCase();
+        const isRateLimited =
+          lowerLifecycle.includes("rate limit") ||
+          lowerLifecycle.includes("too many requests") ||
+          lowerLifecycle.includes("429");
+
+        if (isRateLimited && rateLimitRetries < 2) {
+          rateLimitRetries += 1;
+          const backoffMs = 2_000 * rateLimitRetries;
+          await ctx.onLog(
+            "stdout",
+            `[openclaw-gateway] rate limit detected; retrying run (attempt ${rateLimitRetries}/2) after ${backoffMs}ms
+`,
+          );
+          await sleep(backoffMs);
+          continue;
+        }
+
+        return {
+          exitCode: 1,
+          signal: null,
+          timedOut: false,
+          errorMessage: lifecycleError,
+          errorCode: isRateLimited ? "openclaw_gateway_rate_limited" : "openclaw_gateway_lifecycle_error",
+          resultJson: asRecord(latestResultPayload) ?? asRecord(acceptedPayload),
+        };
+      }
+
       const summaryFromEvents = assistantChunks.join("").trim();
+      if (sessionKeyStrategy === "issue" && wakePayload.issueId) {
+        const lowerSummary = summaryFromEvents.toLowerCase();
+        const identityDrift =
+          lowerSummary.includes("fresh agent") ||
+          lowerSummary.includes("establish my identity") ||
+          lowerSummary.includes("identity.md is blank") ||
+          lowerSummary.includes("bootstrap");
+
+        if (identityDrift) {
+          return {
+            exitCode: 1,
+            signal: null,
+            timedOut: false,
+            errorMessage: "Issue-bound run drifted into bootstrap/identity flow.",
+            errorCode: "openclaw_gateway_issue_context_drift",
+            resultJson: asRecord(latestResultPayload) ?? asRecord(acceptedPayload),
+          };
+        }
+      }
+
       const summaryFromPayload =
         extractResultText(asRecord(acceptedPayload?.result)) ??
         extractResultText(acceptedPayload) ??
